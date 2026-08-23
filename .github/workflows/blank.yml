@@ -1,5 +1,6 @@
-# This is a basic workflow to help you get started with Actions
-
+# This workflow builds the Android project automatically.
+# It auto-detects the source even if it's zipped in the repo, and
+# self-generates the Gradle wrapper if gradlew isn't committed.
 name: CI
 
 # Controls when the workflow will run
@@ -9,7 +10,6 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
@@ -25,12 +25,129 @@ jobs:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v4
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
-
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      # ---------------------------------------------------------------
+      # Auto-detect a project ZIP anywhere in the repo and extract it.
+      # Lets you commit the project as a .zip (as-is) and CI still finds it.
+      # ---------------------------------------------------------------
+      - name: Auto-detect and extract project zip (if present)
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          set -e
+          echo "Looking for zip archives in the repository..."
+          ZIP_FILE=$(find . -maxdepth 3 -iname "*.zip" ! -path "*/.git/*" | head -n 1)
+
+          if [ -n "$ZIP_FILE" ]; then
+            echo "Found zip: $ZIP_FILE — extracting..."
+            unzip -o -q "$ZIP_FILE" -d extracted_project
+            echo "Extraction complete."
+          else
+            echo "No zip file found — assuming the project is already unpacked in the repo."
+          fi
+
+      # ---------------------------------------------------------------
+      # Locate the actual Gradle project root, wherever it ended up
+      # (repo root, a subfolder, or inside the extracted zip).
+      # ---------------------------------------------------------------
+      - name: Locate Gradle project root
+        id: locate
+        run: |
+          set -e
+          SETTINGS_FILE=$(find . -maxdepth 5 \( -iname "settings.gradle.kts" -o -iname "settings.gradle" \) ! -path "*/.git/*" | head -n 1)
+
+          if [ -z "$SETTINGS_FILE" ]; then
+            echo "::error::Could not find settings.gradle(.kts) anywhere in the repo or the extracted zip."
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$SETTINGS_FILE")
+          echo "Project root detected at: $PROJECT_DIR"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+      # ---------------------------------------------------------------
+      # JDK setup (Temurin 17 — required for AGP 8.x / Gradle 8.x)
+      # ---------------------------------------------------------------
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # ---------------------------------------------------------------
+      # Android SDK setup (cmdline-tools, platform-tools, build-tools)
+      # ---------------------------------------------------------------
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # ---------------------------------------------------------------
+      # If gradlew is missing (no wrapper committed), install Gradle
+      # ourselves and generate the wrapper before doing anything else.
+      # ---------------------------------------------------------------
+      - name: Ensure Gradle wrapper exists (self-heal if missing)
+        working-directory: ${{ steps.locate.outputs.project_dir }}
+        run: |
+          set -e
+          if [ -f "./gradlew" ]; then
+            echo "gradlew already present — skipping wrapper generation."
+          else
+            echo "gradlew NOT found — installing Gradle and generating the wrapper..."
+
+            GRADLE_VERSION="8.7"
+            curl -sL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip
+            unzip -q /tmp/gradle.zip -d /tmp
+            export PATH="/tmp/gradle-${GRADLE_VERSION}/bin:$PATH"
+
+            gradle wrapper --gradle-version "${GRADLE_VERSION}"
+            echo "Wrapper generated."
+          fi
+
+          chmod +x ./gradlew
+
+      # ---------------------------------------------------------------
+      # Cache Gradle/Android dependencies for faster subsequent runs
+      # ---------------------------------------------------------------
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      # ---------------------------------------------------------------
+      # Build the debug APK
+      # ---------------------------------------------------------------
+      - name: Build debug APK
+        working-directory: ${{ steps.locate.outputs.project_dir }}
+        run: ./gradlew assembleDebug --stacktrace
+
+      # ---------------------------------------------------------------
+      # Rename the built APK to "shekarchi-arz.apk"
+      # ---------------------------------------------------------------
+      - name: Rename APK to shekarchi-arz
+        id: rename
+        working-directory: ${{ steps.locate.outputs.project_dir }}/app/build/outputs/apk/debug
+        run: |
+          set -e
+          SRC_APK=$(find . -maxdepth 1 -iname "*.apk" | head -n 1)
+
+          if [ -z "$SRC_APK" ]; then
+            echo "::error::No APK found to rename."
+            exit 1
+          fi
+
+          FINAL_NAME="shekarchi-arz.apk"
+          mv "$SRC_APK" "$FINAL_NAME"
+
+          echo "Renamed $SRC_APK -> $FINAL_NAME"
+          echo "apk_path=${{ steps.locate.outputs.project_dir }}/app/build/outputs/apk/debug/$FINAL_NAME" >> "$GITHUB_OUTPUT"
+
+      # ---------------------------------------------------------------
+      # Upload the renamed APK as a downloadable build artifact
+      # ---------------------------------------------------------------
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shekarchi-arz
+          path: ${{ steps.rename.outputs.apk_path }}
+          if-no-files-found: error
