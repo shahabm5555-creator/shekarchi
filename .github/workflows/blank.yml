@@ -1,4 +1,4 @@
-name: Android APK Build
+name: Radar X APK Builder
 
 on:
   push:
@@ -8,29 +8,186 @@ on:
 
 jobs:
   build:
-    name: Build APK
+    name: Build Radar X
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout source
+
+      # ---------------------------------------
+      # 1. دریافت Repository
+      # ---------------------------------------
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup JDK 17
-        uses: actions/setup-java@v4
+
+      # ---------------------------------------
+      # 2. نصب Java 17
+      # ---------------------------------------
+      - name: Setup Java 17
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
-          cache: gradle
 
-      - name: Make Gradle executable
-        run: chmod +x ./gradlew
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
+      # ---------------------------------------
+      # 3. پیدا کردن و استخراج تمام ZIP ها
+      # ---------------------------------------
+      - name: Extract ZIP Projects
+        shell: bash
+        run: |
+          set -e
 
-      - name: Upload APK
+          mkdir -p "$GITHUB_WORKSPACE/zip_projects"
+
+          mapfile -d '' ZIP_FILES < <(
+            find "$GITHUB_WORKSPACE" \
+              -type f \
+              -iname "*.zip" \
+              -not -path "*/zip_projects/*" \
+              -print0
+          )
+
+          if [ "${#ZIP_FILES[@]}" -eq 0 ]; then
+            echo "No ZIP files found."
+            exit 1
+          fi
+
+          INDEX=0
+
+          for ZIP_FILE in "${ZIP_FILES[@]}"; do
+            INDEX=$((INDEX + 1))
+
+            echo "======================================"
+            echo "ZIP #$INDEX"
+            echo "$ZIP_FILE"
+            echo "======================================"
+
+            DEST="$GITHUB_WORKSPACE/zip_projects/project_$INDEX"
+
+            mkdir -p "$DEST"
+
+            unzip -q "$ZIP_FILE" -d "$DEST"
+
+            echo "Extracted to:"
+            echo "$DEST"
+          done
+
+
+      # ---------------------------------------
+      # 4. پیدا کردن Gradle Wrapper
+      # ---------------------------------------
+      - name: Find Gradle Project
+        shell: bash
+        run: |
+          set -e
+
+          echo "Searching for Gradle projects..."
+
+          GRADLEW=$(find "$GITHUB_WORKSPACE/zip_projects" \
+            -type f \
+            -name "gradlew" \
+            -print -quit)
+
+          if [ -z "$GRADLEW" ]; then
+            echo "ERROR: gradlew was not found inside any ZIP."
+            echo ""
+            echo "ZIP contents:"
+            find "$GITHUB_WORKSPACE/zip_projects" -maxdepth 6 -type f | head -300
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$GRADLEW")
+
+          echo "Gradle wrapper found:"
+          echo "$GRADLEW"
+
+          echo "Gradle project:"
+          echo "$PROJECT_DIR"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+
+      # ---------------------------------------
+      # 5. فعال کردن Gradle Wrapper
+      # ---------------------------------------
+      - name: Prepare Gradle
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          chmod +x ./gradlew
+
+          echo "Gradle version:"
+          ./gradlew --version
+
+
+      # ---------------------------------------
+      # 6. Build APK
+      # ---------------------------------------
+      - name: Build Android APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "======================================"
+          echo "Building Android APK"
+          echo "======================================"
+
+          ./gradlew assembleDebug --stacktrace --no-daemon
+
+
+      # ---------------------------------------
+      # 7. پیدا کردن APK
+      # ---------------------------------------
+      - name: Find APK
+        shell: bash
+        run: |
+          set -e
+
+          echo "Searching for APK files..."
+
+          mapfile -d '' APK_FILES < <(
+            find "$PROJECT_DIR" \
+              -type f \
+              -iname "*.apk" \
+              -print0
+          )
+
+          if [ "${#APK_FILES[@]}" -eq 0 ]; then
+            echo "ERROR: No APK was generated."
+            exit 1
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/radar-x-output"
+
+          echo "APK files found:"
+
+          for APK in "${APK_FILES[@]}"; do
+            echo "$APK"
+          done
+
+          # اولین APK را به عنوان خروجی اصلی انتخاب می‌کنیم
+          SOURCE_APK="${APK_FILES[0]}"
+
+          cp "$SOURCE_APK" \
+            "$GITHUB_WORKSPACE/radar-x-output/Radar X.apk"
+
+          echo "Final APK:"
+          ls -lh "$GITHUB_WORKSPACE/radar-x-output/Radar X.apk"
+
+
+      # ---------------------------------------
+      # 8. انتشار Artifact
+      # ---------------------------------------
+      - name: Upload Radar X APK
         uses: actions/upload-artifact@v4
         with:
-          name: CryptoListingRadar-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: Radar X
+          path: "radar-x-output/Radar X.apk"
           if-no-files-found: error
+          retention-days: 30
